@@ -35,3 +35,7 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .claude/settings.local.json
+
+# Gradle output of local native modules
+mobile/modules/*/android/build/
+.gradle/
