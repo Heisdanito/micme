@@ -1,0 +1,16 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="expo.modules.micmeaudio" >
+4
+5    <uses-sdk android:minSdkVersion="24" />
+5-->INJECTED
+5-->INJECTED
+6
+7    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+7-->C:\Users\HEISDANITO\Desktop\Workspace\micMe\mobile\modules\micme-audio\android\src\main\AndroidManifest.xml:2:3-69
+7-->C:\Users\HEISDANITO\Desktop\Workspace\micMe\mobile\modules\micme-audio\android\src\main\AndroidManifest.xml:2:20-66
+8    <uses-permission android:name="android.permission.INTERNET" />
+8-->C:\Users\HEISDANITO\Desktop\Workspace\micMe\mobile\modules\micme-audio\android\src\main\AndroidManifest.xml:3:3-65
+8-->C:\Users\HEISDANITO\Desktop\Workspace\micMe\mobile\modules\micme-audio\android\src\main\AndroidManifest.xml:3:20-62
+9
+10</manifest>

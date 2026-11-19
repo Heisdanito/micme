@@ -1,27 +1,36 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useKeepAwake } from 'expo-keep-awake';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
+import { Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { RTCView } from 'react-native-webrtc';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { FilesSheet } from '../components/FilesSheet';
-import { Button, RoundButton, StatusPill } from '../components/ui';
+import { FilesPanel } from '../components/FilesPanel';
+import { Button, Chip, StatusPill } from '../components/ui';
 import type { Pairing } from '../lib/pairing';
 import { MicMeSession, QUALITY, type Quality, type SessionSnapshot, type Settings } from '../lib/session';
 import { TransferManager, type Transfer } from '../lib/transfers';
 import { colors, radius, space } from '../theme';
 
-const ORDER: Quality[] = ['low', 'medium', 'high'];
+type Tab = 'audio' | 'camera' | 'screen' | 'files';
+type IconName = ComponentProps<typeof Ionicons>['name'];
 type RotateMode = 'auto' | 'portrait' | 'landscape';
+
+const TABS: { id: Tab; label: string; icon: IconName; iconOn: IconName }[] = [
+  { id: 'audio', label: 'Audio', icon: 'mic-outline', iconOn: 'mic' },
+  { id: 'camera', label: 'Camera', icon: 'videocam-outline', iconOn: 'videocam' },
+  { id: 'screen', label: 'Screen', icon: 'phone-portrait-outline', iconOn: 'phone-portrait' },
+  { id: 'files', label: 'Files', icon: 'folder-outline', iconOn: 'folder' },
+];
 const ROTATE_NEXT: Record<RotateMode, RotateMode> = { auto: 'portrait', portrait: 'landscape', landscape: 'auto' };
 const ROTATE_LABEL: Record<RotateMode, string> = { auto: 'Auto-rotate', portrait: 'Portrait', landscape: 'Landscape' };
 
 function linkLabel(host?: string) {
   if (!host) return '';
-  if (host.startsWith('192.168.42.') || host.startsWith('192.168.137.')) return 'USB / PC hotspot';
-  if (host.startsWith('172.20.10.') || host.startsWith('192.168.43.')) return 'Phone hotspot';
-  return 'Local network';
+  if (host === '127.0.0.1') return 'USB cable';
+  if (host.startsWith('192.168.42.')) return 'USB tethering';
+  if (host.startsWith('192.168.137.')) return 'PC hotspot';
+  return 'Wi-Fi / hotspot';
 }
 
 function elapsed(since?: number) {
@@ -48,13 +57,20 @@ export function StreamScreen({
   const insets = useSafeAreaInsets();
   const session = useRef<MicMeSession | null>(null);
   const manager = useMemo(() => new TransferManager(), []);
-  const [snap, setSnap] = useState<SessionSnapshot>({ status: 'connecting', settings, source: 'camera', computer: pairing.name });
+  const [snap, setSnap] = useState<SessionSnapshot>({
+    status: 'connecting',
+    settings,
+    source: 'camera',
+    audio: 'off',
+    level: 0,
+    video: 'off',
+    computer: pairing.name,
+  });
+  const [tab, setTab] = useState<Tab>('audio');
   const [transfers, setTransfers] = useState<Transfer[]>([]);
-  const [filesOpen, setFilesOpen] = useState(false);
   const [rotate, setRotate] = useState<RotateMode>('auto');
   const [toast, setToast] = useState('');
   const [, tick] = useState(0);
-  const pulse = useRef(new Animated.Value(0)).current;
   const lastTap = useRef(0);
 
   useEffect(() => manager.subscribe(setTransfers), [manager]);
@@ -65,7 +81,7 @@ export function StreamScreen({
     s.onFileOffer = (files) => {
       const link = s.link;
       if (!link) return;
-      setFilesOpen(true);
+      setTab('files');
       manager.receive(link, files);
     };
     s.start();
@@ -78,20 +94,19 @@ export function StreamScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pairing]);
 
-  // Persist settings changed during the session (from either side).
   useEffect(() => {
     onSettings(snap.settings);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snap.settings]);
 
   useEffect(() => {
-    const lock =
+    const p =
       rotate === 'portrait'
         ? ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)
         : rotate === 'landscape'
           ? ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE)
           : ScreenOrientation.unlockAsync();
-    lock.catch(() => {});
+    p.catch(() => {});
   }, [rotate]);
 
   useEffect(() => {
@@ -100,55 +115,18 @@ export function StreamScreen({
     return () => clearTimeout(t);
   }, [toast]);
 
-  const live = snap.status === 'live';
-  const micOn = snap.settings.mic;
-  const screen = snap.source === 'screen';
-
-  useEffect(() => {
-    if (!live || !micOn) {
-      pulse.stopAnimation();
-      pulse.setValue(0);
-      return;
-    }
-    const loop = Animated.loop(Animated.timing(pulse, { toValue: 1, duration: 1600, easing: Easing.out(Easing.quad), useNativeDriver: true }));
-    loop.start();
-    return () => loop.stop();
-  }, [live, micOn, pulse]);
-
   const s = session.current;
   const st = snap.settings;
-  const statusLabel =
-    snap.status === 'live'
-      ? `Live · ${elapsed(snap.startedAt)}`
-      : snap.status === 'negotiating'
-        ? 'Starting'
-        : snap.status === 'reconnecting'
-          ? 'Reconnecting'
-          : snap.status === 'closed'
-            ? 'Stopped'
-            : 'Connecting';
-  const tone = live ? 'live' : 'busy';
+  const screen = snap.source === 'screen';
+  const streaming = snap.audio === 'streaming';
   const activeTransfers = transfers.filter((t) => t.state === 'active').length;
 
-  // Double-tap the preview to flip camera.
-  const onStageTap = () => {
-    const now = Date.now();
-    if (now - lastTap.current < 300) {
-      if (st.cam && !screen) {
-        s?.flip();
-        setToast(st.facing === 'front' ? 'Back camera' : 'Front camera');
-      }
-      lastTap.current = 0;
-    } else lastTap.current = now;
-  };
-
-  const toggleScreen = async () => {
-    try {
-      await s?.setSource(screen ? 'camera' : 'screen');
-    } catch {
-      setToast('Screen sharing was not allowed');
-    }
-  };
+  const pill =
+    snap.status === 'connected'
+      ? { label: streaming ? `Live · ${elapsed(snap.startedAt)}` : 'Connected', tone: streaming ? ('live' as const) : ('busy' as const) }
+      : snap.status === 'reconnecting'
+        ? { label: 'Reconnecting', tone: 'busy' as const }
+        : { label: 'Connecting', tone: 'busy' as const };
 
   if (snap.status === 'error') {
     return (
@@ -162,50 +140,153 @@ export function StreamScreen({
     );
   }
 
+  const onPreviewTap = () => {
+    const now = Date.now();
+    if (now - lastTap.current < 300) {
+      s?.flip();
+      setToast(st.facing === 'front' ? 'Back camera' : 'Front camera');
+      lastTap.current = 0;
+    } else lastTap.current = now;
+  };
+
   return (
     <View style={styles.root}>
-      <Pressable style={StyleSheet.absoluteFill} onPress={onStageTap} accessibilityHint="Double-tap to switch camera">
-        {screen ? (
-          <View style={[StyleSheet.absoluteFill, styles.center]}>
-            <View style={styles.micCore}>
-              <Ionicons name="phone-portrait-outline" size={50} color="#fff" />
-            </View>
-            <Text style={styles.micText}>Sharing your screen with {snap.computer}</Text>
-            <Text style={styles.micSub}>You can leave the app. Stop from here or the notification.</Text>
-          </View>
-        ) : st.cam && snap.previewUrl ? (
-          <RTCView streamURL={snap.previewUrl} style={StyleSheet.absoluteFill} objectFit="cover" mirror={st.facing === 'front'} />
-        ) : (
-          <View style={[StyleSheet.absoluteFill, styles.center]}>
-            <View style={styles.micStage}>
-              <Animated.View
-                style={[
-                  styles.ring,
-                  {
-                    opacity: pulse.interpolate({ inputRange: [0, 1], outputRange: [0.5, 0] }),
-                    transform: [{ scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.8] }) }],
-                  },
-                ]}
-              />
-              <View style={[styles.micCore, !micOn && { backgroundColor: colors.surface2 }]}>
-                <Ionicons name={micOn ? 'mic' : 'mic-off'} size={54} color="#fff" />
-              </View>
-            </View>
-            <Text style={styles.micText}>{micOn ? (live ? 'Your computer is hearing you' : 'Getting ready…') : 'Microphone muted'}</Text>
-          </View>
-        )}
-      </Pressable>
-
-      <View style={[styles.top, { paddingTop: insets.top + space(3), paddingLeft: insets.left + space(5), paddingRight: insets.right + space(5) }]}>
+      {/* header */}
+      <View style={[styles.header, { paddingTop: insets.top + space(3), paddingLeft: insets.left + space(5), paddingRight: insets.right + space(4) }]}>
         <View style={{ flex: 1 }}>
           <Text style={styles.computer} numberOfLines={1}>
             {snap.computer}
           </Text>
           <Text style={styles.sub} numberOfLines={1}>
-            {[linkLabel(snap.host), snap.host].filter(Boolean).join(' · ')}
+            {snap.status === 'reconnecting' ? snap.error || 'Reconnecting…' : linkLabel(snap.host)}
           </Text>
         </View>
-        <StatusPill label={statusLabel} tone={tone} />
+        <StatusPill label={pill.label} tone={pill.tone} />
+        <Pressable onPress={onExit} style={styles.close} accessibilityLabel="Disconnect" hitSlop={8}>
+          <Ionicons name="close" size={22} color={colors.text} />
+        </Pressable>
+      </View>
+
+      {/* content */}
+      <View style={[styles.body, { paddingLeft: insets.left + space(5), paddingRight: insets.right + space(5) }]}>
+        {tab === 'audio' && (
+          <ScrollView contentContainerStyle={styles.tabContent}>
+            <View style={styles.audioStage}>
+              <View
+                style={[
+                  styles.levelRing,
+                  { transform: [{ scale: 1 + Math.min(1, snap.level * 2.2) * 0.45 }], opacity: st.mic && streaming ? 0.35 : 0 },
+                ]}
+              />
+              <Pressable
+                onPress={() => s?.setMic(!st.mic)}
+                style={[styles.micCore, !st.mic && { backgroundColor: colors.surface2 }]}
+                accessibilityLabel={st.mic ? 'Mute microphone' : 'Unmute microphone'}
+              >
+                <Ionicons name={st.mic ? 'mic' : 'mic-off'} size={58} color="#fff" />
+              </Pressable>
+            </View>
+            <Text style={styles.bigTitle}>
+              {!st.mic ? 'Muted' : streaming ? 'Your PC is hearing you' : snap.audio === 'error' ? 'Microphone problem' : 'Connecting audio…'}
+            </Text>
+            <Text style={styles.bigSub}>
+              {snap.audio === 'error'
+                ? snap.audioError
+                : snap.audio === 'retrying'
+                  ? `Reconnecting audio${snap.audioError ? `: ${snap.audioError}` : '…'}`
+                  : st.mic
+                    ? 'Tap the mic to mute.'
+                    : 'Tap the mic to unmute.'}
+            </Text>
+
+            <View style={styles.card}>
+              <Row icon="sparkles-outline" title="Clean voice" hint="Noise suppression, echo cancel, auto gain">
+                <Switch
+                  value={st.voiceProcessing}
+                  onValueChange={(v) => s?.setVoiceProcessing(v)}
+                  trackColor={{ true: colors.accent, false: colors.border }}
+                  thumbColor="#fff"
+                />
+              </Row>
+            </View>
+          </ScrollView>
+        )}
+
+        {tab === 'camera' && (
+          <View style={[styles.tabContent, { flex: 1 }]}>
+            <Pressable style={styles.preview} onPress={onPreviewTap} accessibilityHint="Double-tap to switch camera">
+              {screen ? (
+                <Empty icon="phone-portrait-outline" text="The phone is sharing its screen. Stop screen sharing to use the camera." />
+              ) : st.cam && snap.previewUrl ? (
+                <RTCView streamURL={snap.previewUrl} style={StyleSheet.absoluteFill} objectFit="cover" mirror={st.facing === 'front'} />
+              ) : (
+                <Empty icon="videocam-off-outline" text="Camera is off" />
+              )}
+              {st.cam && !screen && (
+                <View style={styles.previewTag}>
+                  <Text style={styles.previewTagText}>
+                    {snap.video === 'live' ? `On PC · ${snap.rttMs ?? '—'} ms` : snap.video === 'retrying' ? 'Reconnecting video…' : 'Connecting video…'}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+            <View style={styles.controlRow}>
+              <Button
+                title={st.cam ? 'Camera off' : 'Camera on'}
+                icon={st.cam ? 'videocam-off-outline' : 'videocam-outline'}
+                variant={st.cam ? 'secondary' : 'primary'}
+                disabled={screen}
+                onPress={() => s?.setCam(!st.cam)}
+                style={{ flex: 1 }}
+              />
+              <Button title="Flip" icon="camera-reverse-outline" variant="secondary" disabled={!st.cam || screen} onPress={() => s?.flip()} />
+            </View>
+            <View style={styles.chipsRow}>
+              {(Object.keys(QUALITY) as Quality[]).map((q) => (
+                <Chip key={q} label={QUALITY[q].label} selected={st.quality === q} onPress={() => s?.setQuality(q)} />
+              ))}
+              <Chip label={ROTATE_LABEL[rotate]} selected={rotate !== 'auto'} onPress={() => setRotate(ROTATE_NEXT[rotate])} />
+            </View>
+          </View>
+        )}
+
+        {tab === 'screen' && (
+          <ScrollView contentContainerStyle={styles.tabContent}>
+            <View style={styles.screenHero}>
+              <Ionicons name={screen ? 'radio-button-on' : 'phone-portrait-outline'} size={56} color={screen ? colors.danger : colors.accent} />
+            </View>
+            <Text style={styles.bigTitle}>{screen ? 'Sharing your screen' : 'Share your screen'}</Text>
+            <Text style={styles.bigSub}>
+              {MicMeSession.screenShareSupported
+                ? screen
+                  ? snap.video === 'live'
+                    ? 'Your PC can see your screen. You can switch to other apps.'
+                    : 'Connecting video…'
+                  : 'Show your phone’s screen on the PC. Android will ask you to allow it.'
+                : 'Screen sharing is available on Android.'}
+            </Text>
+            {MicMeSession.screenShareSupported && (
+              <Button
+                title={screen ? 'Stop sharing' : 'Start sharing'}
+                icon={screen ? 'stop-circle-outline' : 'play-circle-outline'}
+                variant={screen ? 'danger' : 'primary'}
+                onPress={() => s?.setSource(screen ? 'camera' : 'screen').catch(() => setToast('Screen sharing was not allowed'))}
+                style={{ alignSelf: 'stretch', marginTop: space(4) }}
+              />
+            )}
+          </ScrollView>
+        )}
+
+        {tab === 'files' && (
+          <View style={[styles.tabContent, { flex: 1 }]}>
+            <FilesPanel
+              transfers={transfers}
+              manager={manager}
+              canSend={!!snap.link}
+              onSend={() => snap.link && manager.pickAndSend(snap.link).catch(() => setToast('Could not open files'))}
+            />
+          </View>
+        )}
       </View>
 
       {!!toast && (
@@ -214,143 +295,111 @@ export function StreamScreen({
         </View>
       )}
 
-      <View style={[styles.bottom, { paddingBottom: insets.bottom + space(4), paddingLeft: insets.left + space(4), paddingRight: insets.right + space(4) }]}>
-        {live && (
-          <Text style={styles.stats}>
-            {snap.rttMs != null ? `${snap.rttMs} ms` : '— ms'} · {snap.kbps != null ? `${snap.kbps} kbps` : '— kbps'}
-            {screen ? ' · screen' : st.cam ? ` · ${QUALITY[st.quality].label}` : ' · audio only'}
-          </Text>
-        )}
-        {snap.status === 'reconnecting' && !!snap.error && <Text style={styles.warn}>{snap.error}</Text>}
-
-        <View style={styles.chips}>
-          <MiniButton icon="camera-reverse-outline" label="Flip" disabled={!st.cam || screen} onPress={() => s?.flip()} />
-          <MiniButton
-            icon="options-outline"
-            label={QUALITY[st.quality].label}
-            disabled={screen}
-            onPress={() => s?.setQuality(ORDER[(ORDER.indexOf(st.quality) + 1) % ORDER.length])}
-          />
-          <MiniButton icon={rotate === 'auto' ? 'sync-outline' : 'lock-closed-outline'} label={ROTATE_LABEL[rotate]} onPress={() => setRotate(ROTATE_NEXT[rotate])} />
-        </View>
-
-        <View style={styles.controls}>
-          <RoundButton icon={micOn ? 'mic' : 'mic-off'} label={micOn ? 'Mute' : 'Unmute'} active={micOn} onPress={() => s?.setMic(!micOn)} />
-          <RoundButton
-            icon={st.cam ? 'videocam' : 'videocam-off'}
-            label={st.cam ? 'Camera' : 'Cam off'}
-            active={st.cam && !screen}
-            onPress={() => !screen && s?.setCam(!st.cam)}
-          />
-          {MicMeSession.screenShareSupported && (
-            <RoundButton icon={screen ? 'stop-circle-outline' : 'tv-outline'} label={screen ? 'Stop share' : 'Screen'} active={!screen} onPress={toggleScreen} />
-          )}
-          <View>
-            <RoundButton icon="folder-open-outline" label="Files" onPress={() => setFilesOpen(true)} />
-            {activeTransfers > 0 && (
-              <View style={styles.badge}>
-                <Text style={styles.badgeText}>{activeTransfers}</Text>
+      {/* tab bar */}
+      <View style={[styles.tabBar, { paddingBottom: insets.bottom + space(2), paddingLeft: insets.left, paddingRight: insets.right }]}>
+        {TABS.map((t) => {
+          const active = tab === t.id;
+          const on =
+            (t.id === 'audio' && streaming && st.mic) ||
+            (t.id === 'camera' && st.cam && !screen) ||
+            (t.id === 'screen' && screen) ||
+            (t.id === 'files' && activeTransfers > 0);
+          return (
+            <Pressable key={t.id} style={styles.tabItem} onPress={() => setTab(t.id)} accessibilityRole="tab" accessibilityState={{ selected: active }}>
+              <View style={[styles.tabIcon, active && styles.tabIconActive]}>
+                <Ionicons name={active ? t.iconOn : t.icon} size={22} color={active ? colors.text : colors.muted} />
+                {on && <View style={styles.tabDot} />}
               </View>
-            )}
-          </View>
-          <RoundButton icon="stop" label="Stop" tone="danger" onPress={onExit} />
-        </View>
+              <Text style={[styles.tabLabel, active && { color: colors.text }]}>{t.label}</Text>
+            </Pressable>
+          );
+        })}
       </View>
-
-      <FilesSheet
-        visible={filesOpen}
-        onClose={() => setFilesOpen(false)}
-        transfers={transfers}
-        manager={manager}
-        canSend={!!snap.link}
-        onSend={() => snap.link && manager.pickAndSend(snap.link).catch(() => setToast('Could not open files'))}
-      />
     </View>
   );
 }
 
-function MiniButton({ icon, label, onPress, disabled }: { icon: any; label: string; onPress: () => void; disabled?: boolean }) {
+function Row({ icon, title, hint, children }: { icon: IconName; title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      style={({ pressed }) => [styles.mini, { opacity: disabled ? 0.4 : pressed ? 0.75 : 1 }]}
-    >
-      <Ionicons name={icon} size={16} color={colors.text} />
-      <Text style={styles.miniText}>{label}</Text>
-    </Pressable>
+    <View style={styles.row}>
+      <Ionicons name={icon} size={22} color={colors.muted} />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.rowTitle}>{title}</Text>
+        {hint && <Text style={styles.rowHint}>{hint}</Text>}
+      </View>
+      {children}
+    </View>
+  );
+}
+
+function Empty({ icon, text }: { icon: IconName; text: string }) {
+  return (
+    <View style={[StyleSheet.absoluteFill, styles.center, { padding: space(6), gap: space(3) }]}>
+      <Ionicons name={icon} size={44} color={colors.muted} />
+      <Text style={[styles.bigSub, { marginTop: 0 }]}>{text}</Text>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.bg },
   center: { alignItems: 'center', justifyContent: 'center' },
-  top: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space(3),
-    paddingBottom: space(4),
-    backgroundColor: 'rgba(11,13,18,0.65)',
-  },
+  header: { flexDirection: 'row', alignItems: 'center', gap: space(3), paddingBottom: space(3) },
   computer: { color: colors.text, fontSize: 18, fontWeight: '700' },
   sub: { color: colors.muted, fontSize: 13, marginTop: 2 },
-  bottom: {
+  close: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface2 },
+  body: { flex: 1 },
+  tabContent: { paddingTop: space(4), paddingBottom: space(4), gap: space(3) },
+  audioStage: { alignSelf: 'center', width: 230, height: 230, alignItems: 'center', justifyContent: 'center', marginTop: space(4) },
+  levelRing: { position: 'absolute', width: 150, height: 150, borderRadius: 75, backgroundColor: colors.accent },
+  micCore: { width: 150, height: 150, borderRadius: 75, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
+  bigTitle: { color: colors.text, fontSize: 22, fontWeight: '700', textAlign: 'center', marginTop: space(2) },
+  bigSub: { color: colors.muted, fontSize: 14, textAlign: 'center', lineHeight: 20, paddingHorizontal: space(4) },
+  card: { backgroundColor: colors.surface, borderRadius: radius.lg, borderWidth: 1, borderColor: colors.border, padding: space(4), marginTop: space(4) },
+  row: { flexDirection: 'row', alignItems: 'center', gap: space(3) },
+  rowTitle: { color: colors.text, fontSize: 15, fontWeight: '600' },
+  rowHint: { color: colors.muted, fontSize: 12.5 },
+  preview: { flex: 1, minHeight: 240, borderRadius: radius.lg, overflow: 'hidden', backgroundColor: '#000', borderWidth: 1, borderColor: colors.border },
+  previewTag: {
     position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingTop: space(4),
-    backgroundColor: 'rgba(11,13,18,0.8)',
-    borderTopLeftRadius: radius.lg,
-    borderTopRightRadius: radius.lg,
-    gap: space(3),
-  },
-  chips: { flexDirection: 'row', justifyContent: 'center', gap: space(2) },
-  mini: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    height: 34,
-    paddingHorizontal: space(3),
+    top: space(3),
+    left: space(3),
+    backgroundColor: 'rgba(11,13,18,0.75)',
     borderRadius: radius.pill,
-    backgroundColor: colors.surface2,
+    paddingHorizontal: space(3),
+    paddingVertical: 5,
+  },
+  previewTagText: { color: colors.text, fontSize: 12, fontWeight: '600' },
+  controlRow: { flexDirection: 'row', gap: space(2) },
+  chipsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: space(2) },
+  screenHero: {
+    alignSelf: 'center',
+    width: 120,
+    height: 120,
+    borderRadius: 36,
+    backgroundColor: colors.surface,
     borderWidth: 1,
     borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: space(10),
   },
-  miniText: { color: colors.text, fontSize: 13, fontWeight: '600' },
-  controls: { flexDirection: 'row', justifyContent: 'space-evenly' },
-  stats: { color: colors.muted, textAlign: 'center', fontSize: 13, fontVariant: ['tabular-nums'] },
-  warn: { color: colors.warning, textAlign: 'center', fontSize: 13 },
-  micStage: { width: 200, height: 200, alignItems: 'center', justifyContent: 'center' },
-  ring: { position: 'absolute', width: 130, height: 130, borderRadius: 65, backgroundColor: colors.accent },
-  micCore: { width: 130, height: 130, borderRadius: 65, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
-  micText: { color: colors.text, fontSize: 16, fontWeight: '600', marginTop: space(4), textAlign: 'center', paddingHorizontal: space(6) },
-  micSub: { color: colors.muted, fontSize: 13, marginTop: space(2), textAlign: 'center', paddingHorizontal: space(8) },
   toast: {
     position: 'absolute',
     alignSelf: 'center',
-    top: '42%',
-    backgroundColor: 'rgba(11,13,18,0.85)',
+    top: '45%',
+    backgroundColor: 'rgba(11,13,18,0.9)',
     paddingHorizontal: space(4),
     paddingVertical: space(2),
     borderRadius: radius.pill,
   },
   toastText: { color: colors.text, fontWeight: '600' },
-  badge: {
-    position: 'absolute',
-    top: -2,
-    right: -2,
-    minWidth: 20,
-    height: 20,
-    borderRadius: 10,
-    paddingHorizontal: 5,
-    backgroundColor: colors.accent,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  badgeText: { color: '#fff', fontSize: 11, fontWeight: '800' },
+  tabBar: { flexDirection: 'row', borderTopWidth: 1, borderTopColor: colors.border, backgroundColor: colors.surface, paddingTop: space(2) },
+  tabItem: { flex: 1, alignItems: 'center', gap: 4 },
+  tabIcon: { width: 56, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  tabIconActive: { backgroundColor: colors.accentSoft },
+  tabDot: { position: 'absolute', top: 3, right: 12, width: 8, height: 8, borderRadius: 4, backgroundColor: colors.success },
+  tabLabel: { color: colors.muted, fontSize: 12, fontWeight: '600' },
   errTitle: { color: colors.text, fontSize: 22, fontWeight: '700', marginTop: space(4) },
   errBody: { color: colors.muted, fontSize: 15, textAlign: 'center', marginTop: space(2), lineHeight: 21 },
 });

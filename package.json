@@ -11,6 +11,7 @@
     "desktop:dist": "npm --prefix desktop run dist",
     "mobile": "npm --prefix mobile start",
     "mobile:apk": "cd mobile && npx eas-cli@latest build -p android --profile preview",
-    "test": "npm --prefix desktop test && cd mobile && npx tsc --noEmit"
+    "test": "npm --prefix desktop test && cd mobile && npx tsc --noEmit",
+    "collect": "node scripts/collect-builds.mjs"
   }
 }

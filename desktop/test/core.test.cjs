@@ -100,6 +100,29 @@ test('signaling: rejects bad code, relays offer/answer, gates file API by token'
     const dl = await fetch(`http://127.0.0.1:${port}/api/files/${offer.files[0].id}`, { headers: { 'x-micme-token': welcome.token } });
     assert.equal((await dl.arrayBuffer()).byteLength, 1000);
 
+    // Raw PCM audio: token required, binary frames relayed to the desktop.
+    const denyAudio = await new Promise((resolve) => {
+      const a = new WebSocket(`ws://127.0.0.1:${port}/audio?token=wrong`);
+      a.on('error', () => resolve('rejected'));
+      a.on('open', () => resolve('opened'));
+    });
+    assert.equal(denyAudio, 'rejected');
+
+    const audio = new WebSocket(`ws://127.0.0.1:${port}/audio?token=${welcome.token}`);
+    const gotPcm = new Promise((resolve) => {
+      desk.removeAllListeners('message');
+      desk.on('message', (d, isBinary) => {
+        if (isBinary) resolve(d);
+      });
+    });
+    await new Promise((r) => audio.on('open', r));
+    const frame = Buffer.alloc(1920, 3); // one 20 ms PCM16 frame
+    audio.send(frame);
+    const relayed = await gotPcm;
+    assert.equal(relayed.length, 1920);
+    assert.equal(relayed[0], 3);
+    audio.close();
+
     for (const ws of [desk, bad, phone]) ws.close();
   } finally {
     await srv.close();

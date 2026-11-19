@@ -15,10 +15,12 @@
 
 | | Feature |
 |---|---|
-| 🎙️ | **Phone → PC microphone.** Low-latency Opus audio with optional noise suppression, echo cancellation and auto gain. On the PC: volume boost up to 300%, a level meter, and output to any device (pick a virtual cable to use it as a mic in Zoom, Discord, OBS and so on). |
+| 🎙️ | **Phone → PC microphone.** Raw 48 kHz audio streamed natively, the same way MicStream and WO Mic work, with optional noise suppression, echo cancellation and auto gain. On the PC: volume boost up to 300%, a level meter, and output to any device (pick a virtual cable to use it as a mic in Zoom, Discord, OBS and so on). |
 | 📷 | **Phone → PC camera.** 360p / 720p / 1080p, front or back camera, switchable live from either device. |
 | 📱 | **Phone screen sharing** (Android). Mirror the phone screen to the PC; it keeps streaming while you use other apps. |
 | 📁 | **Two-way file transfer.** Send files from the phone to `Downloads/MicMe` on the PC, or drag and drop files onto the desktop app to send them to the phone. Both sides show progress. |
+| 🔌 | **Real USB mode.** With USB debugging on, the PC links to the phone over the cable through `adb reverse` automatically, with no network needed for audio. |
+| 🗂️ | **One tab per feature.** Connect, Audio, Camera, Screen and Files each get their own tab on the PC and on the phone. |
 | 🔗 | **QR pairing.** The desktop shows a QR code with every address it can be reached on (USB, hotspot, Wi-Fi). The phone tries them all at once and keeps the first one that answers. A 6-character code allows manual entry. |
 | 🔄 | **Rotation and gestures.** On the PC: scroll or pinch to zoom, drag to pan, double-click for fullscreen, `R` rotate, `M` mirror, `C` clean feed for OBS. On the phone: double-tap to flip camera, and a lock for auto-rotate, portrait or landscape. |
 | 🎛️ | **Remote control.** Mute, toggle camera, flip, change quality and toggle voice cleanup on the phone from the desktop. |
@@ -40,10 +42,11 @@
  └─────────────────────────────────────────────────────┘        └──────────────────────────────────────────┘
 ```
 
-* **Media** goes straight from phone to PC over WebRTC on the local link. Nothing passes through the internet and no STUN or TURN server is used.
+* **Audio** is captured by a small native Kotlin module (`mobile/modules/micme-audio`) using AudioRecord: 48 kHz mono PCM16 in 20 ms frames, sent as binary WebSocket messages to `/audio`. On the PC an AudioWorklet plays it through a ~60 ms jitter buffer that never grows past 200 ms. This path doesn't depend on WebRTC, so it works over hotspot, USB tethering, plain USB (`adb reverse`) and Wi-Fi.
+* **Camera and screen** go straight from phone to PC over WebRTC on the local link. Nothing passes through the internet. Android's WebRTC normally ignores the phone's own hotspot and tethering interfaces; a config plugin turns that off (`WebRTC-AndroidNetworkMonitor-IsAdapterAvailable/Disabled/`), so video works on those links too.
 * **Signaling** is a small WebSocket relay inside the desktop app. The phone must present the current pairing code, and wrong codes are rate-limited.
 * **Files** use plain HTTP, the same approach as [LocalSend](https://github.com/localsend/localsend). Each pairing issues a random session token that every file request must carry.
-* **USB** works through *USB tethering*: the cable becomes a network link, so it uses the same fast path as a hotspot.
+* **USB** works two ways: plain USB with USB debugging (`adb reverse`, set up automatically when adb is installed), or *USB tethering*, which turns the cable into a network link.
 
 ## Requirements ("skills check")
 
@@ -79,6 +82,7 @@ npm run doctor         # checks your tools
 ```bash
 npm run desktop        # dev mode with hot reload
 npm run desktop:dist   # builds release/MicMe-Setup-x.y.z.exe and MicMe-Portable-x.y.z.exe
+npm run collect        # copies the APK and both .exe files to ../builds/MicMe-x.y.z/
 ```
 
 The installer adds a Windows Firewall rule so phones can connect over hotspot and USB networks, which Windows often marks as *Public*. If you use the portable build, allow MicMe when Windows asks.
@@ -113,7 +117,7 @@ Install the APK, then for development run `npm run mobile` and open the dev buil
 2. Connect the two devices in one of these ways:
    * **Phone hotspot:** turn on the hotspot and join it from the PC.
    * **PC hotspot:** turn on Windows *Mobile Hotspot* and join it from the phone.
-   * **USB:** plug in the cable, then Android → *Settings › Network › Hotspot & tethering › USB tethering* (iPhone: *Personal Hotspot*).
+   * **USB (recommended for audio):** plug in the cable with USB debugging on. MicMe sets up the link by itself. Or turn on *USB tethering* (iPhone: *Personal Hotspot*).
    * **Wi-Fi:** put both on the same network.
 3. In the phone app tap **Scan QR code**. You're live.
 
@@ -151,7 +155,8 @@ micme/
 
 ## Known limitations
 
-* Screen sharing is Android only. iOS needs a Broadcast Upload Extension, which is not included.
+* Screen sharing and the native audio pipe are Android only. iOS would need its own audio module and a Broadcast Upload Extension.
+* Plain-USB mode carries audio, files and control. Camera and screen video need a network link too (hotspot, tethering or Wi-Fi).
 * Some Android versions pause the microphone while the app is in the background, unless you're screen sharing. Keep MicMe in front for mic-only use; the screen stays awake automatically.
 * Guest and corporate Wi-Fi networks often block device-to-device traffic. Use a hotspot or USB instead.
 * Using the phone as a mic or camera inside other apps relies on VB-CABLE or OBS, because MicMe does not install its own audio or camera drivers.

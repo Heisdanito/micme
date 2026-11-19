@@ -6,6 +6,7 @@ const path = require('node:path');
 const { createSignalingServer } = require('./server.cjs');
 const { listAddresses } = require('./network.cjs');
 const { newCode, pairingUrl } = require('./pairing.cjs');
+const { createAdbBridge } = require('./adb.cjs');
 
 // Advertise real LAN IPs in ICE candidates instead of *.local mDNS names,
 // which phones on a hotspot/USB link often cannot resolve.
@@ -25,14 +26,21 @@ let port = 0;
 let addresses = [];
 let win = null;
 let server = null;
+let adbBridge = null;
+let usbDevices = [];
 
 function info() {
   const hosts = addresses.map((a) => a.address);
+  // Phones plugged in with USB debugging reach us at 127.0.0.1 via `adb reverse`.
+  if (usbDevices.length) hosts.unshift('127.0.0.1');
+  else hosts.push('127.0.0.1');
   return {
     name: computerName,
     code,
     port,
     addresses,
+    usbDevices,
+    adbAvailable: !!adbBridge?.available,
     adminSecret,
     url: hosts.length ? pairingUrl({ hosts, port, code, name: computerName }) : null,
     version: app.getVersion(),
@@ -165,6 +173,16 @@ app.whenReady().then(async () => {
   }
   addresses = listAddresses();
   setInterval(refreshAddresses, 4000);
+  if (port) {
+    adbBridge = createAdbBridge({
+      port,
+      onChange: (list) => {
+        usbDevices = list;
+        pushInfo();
+      },
+    });
+    adbBridge.start();
+  }
 
   createWindow();
   app.on('activate', () => {
@@ -177,5 +195,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  adbBridge?.stop();
   server?.close();
 });

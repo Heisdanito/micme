@@ -57,7 +57,48 @@ function createSignalingServer({ getCode, adminSecret, name, downloadsDir, onEve
     res.end(`MicMe is running on ${name}. Open the MicMe phone app and scan the QR code.\n`);
   });
 
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: 256 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
+  // Raw mic audio from the phone: binary PCM16 48 kHz mono frames (MicStream-style).
+  const audioWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024, perMessageDeflate: false });
+  let audioSock = null;
+
+  httpServer.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/ws') {
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    } else if (url.pathname === '/audio') {
+      const token = url.searchParams.get('token') || '';
+      if (!phoneToken || !safeEqual(token, phoneToken)) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+      audioWss.handleUpgrade(req, socket, head, (ws) => audioWss.emit('connection', ws, req));
+    } else {
+      socket.destroy();
+    }
+  });
+
+  audioWss.on('connection', (ws) => {
+    if (audioSock && audioSock !== ws) audioSock.terminate();
+    audioSock = ws;
+    ws.isAlive = true;
+    ws.on('pong', () => (ws.isAlive = true));
+    sendTo(desktop, { t: 'audio', on: true });
+    ws.on('message', (data, isBinary) => {
+      if (!isBinary) return;
+      if (desktop && desktop.readyState === desktop.OPEN && desktop.bufferedAmount < 256 * 1024) {
+        desktop.send(data, { binary: true });
+      }
+    });
+    ws.on('close', () => {
+      if (audioSock === ws) {
+        audioSock = null;
+        sendTo(desktop, { t: 'audio', on: false });
+      }
+    });
+    ws.on('error', () => {});
+  });
 
   const sendTo = (ws, msg) => {
     if (ws && ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -113,6 +154,7 @@ function createSignalingServer({ getCode, adminSecret, name, downloadsDir, onEve
           if (phone) {
             sendTo(desktop, { t: 'phone-joined', device: phoneInfo });
             sendTo(phone, { t: 'renegotiate' });
+            if (audioSock) sendTo(desktop, { t: 'audio', on: true });
           }
           return;
         }
@@ -166,6 +208,7 @@ function createSignalingServer({ getCode, adminSecret, name, downloadsDir, onEve
         phone = null;
         phoneInfo = null;
         phoneToken = null;
+        if (audioSock) audioSock.close();
         transfers.clearOffers();
         sendTo(desktop, { t: 'phone-left' });
         onEvent({ type: 'phone-left' });
@@ -177,7 +220,7 @@ function createSignalingServer({ getCode, adminSecret, name, downloadsDir, onEve
   });
 
   const heartbeat = setInterval(() => {
-    for (const ws of wss.clients) {
+    for (const ws of [...wss.clients, ...audioWss.clients]) {
       if (!ws.isAlive) {
         ws.terminate();
         continue;
@@ -227,8 +270,9 @@ function createSignalingServer({ getCode, adminSecret, name, downloadsDir, onEve
 
   function close() {
     clearInterval(heartbeat);
-    for (const ws of wss.clients) ws.terminate();
+    for (const ws of [...wss.clients, ...audioWss.clients]) ws.terminate();
     wss.close();
+    audioWss.close();
     return new Promise((r) => httpServer.close(() => r()));
   }
 

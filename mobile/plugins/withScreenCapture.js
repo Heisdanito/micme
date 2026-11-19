@@ -1,11 +1,18 @@
 /**
- * Enables react-native-webrtc's built-in MediaProjection foreground service so
- * getDisplayMedia() (phone screen sharing) works on Android 10+.
+ * Android WebRTC setup:
+ *  - enables react-native-webrtc's MediaProjection foreground service so
+ *    getDisplayMedia() (phone screen sharing) works on Android 10+
+ *  - lets ICE use hotspot / USB-tether interfaces (see FLAG below)
  */
 const { withMainApplication, withAndroidManifest, AndroidConfig } = require('expo/config-plugins');
 
 const IMPORT = 'import com.oney.WebRTCModule.WebRTCModuleOptions';
-const FLAG = 'WebRTCModuleOptions.getInstance().enableMediaProjectionService = true';
+// Second line: by default Android's WebRTC ignores network interfaces that
+// ConnectivityManager doesn't report, which includes the phone's own hotspot
+// and USB-tethering interfaces. Without this, ICE only tries mobile data.
+const FLAG =
+  'WebRTCModuleOptions.getInstance().enableMediaProjectionService = true\n' +
+  '    WebRTCModuleOptions.getInstance().fieldTrials = "WebRTC-AndroidNetworkMonitor-IsAdapterAvailable/Disabled/"';
 
 function withFlag(config) {
   return withMainApplication(config, (cfg) => {

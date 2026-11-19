@@ -1,3 +1,4 @@
+import { Camera } from 'expo-camera';
 import { Platform } from 'react-native';
 import {
   mediaDevices,
@@ -7,6 +8,7 @@ import {
   RTCPeerConnection,
   RTCSessionDescription,
 } from 'react-native-webrtc';
+import MicmeAudio, { type AudioState } from '../../modules/micme-audio';
 import type { Pairing } from './pairing';
 import { openFirstReachable, send, type SignalMessage } from './signaling';
 
@@ -28,7 +30,10 @@ export type Settings = {
   voiceProcessing: boolean;
 };
 
-export type Status = 'connecting' | 'negotiating' | 'live' | 'reconnecting' | 'error' | 'closed';
+/** Session = paired with the computer over the signaling socket. */
+export type Status = 'connecting' | 'connected' | 'reconnecting' | 'error' | 'closed';
+/** Video = WebRTC link for camera / screen (only while one of them is on). */
+export type VideoStatus = 'off' | 'connecting' | 'live' | 'retrying';
 
 export type SessionSnapshot = {
   status: Status;
@@ -37,18 +42,20 @@ export type SessionSnapshot = {
   computer?: string;
   settings: Settings;
   source: Source;
-  /** HTTP base + token for file transfer, set once paired. */
+  audio: AudioState | 'off';
+  audioError?: string;
+  level: number;
+  video: VideoStatus;
   link?: { base: string; token: string };
   previewUrl?: string;
   rttMs?: number;
-  kbps?: number;
   startedAt?: number;
 };
 
 type Listener = (s: SessionSnapshot) => void;
 type FileOfferListener = (files: { id: string; name: string; size: number }[]) => void;
 
-const MAX_RETRIES = 30;
+const MAX_RETRIES = 40;
 
 function deviceInfo() {
   const c: any = Platform.constants || {};
@@ -57,74 +64,50 @@ function deviceInfo() {
 }
 
 export class MicMeSession {
+  static screenShareSupported = Platform.OS === 'android';
+
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
-  private audioTrack: MediaStreamTrack | null = null;
   private videoTrack: MediaStreamTrack | null = null;
   private preview: MediaStream | null = null;
-  private audioSender: any = null;
   private videoSender: any = null;
   private pendingIce: any[] = [];
   private remoteSet = false;
   private stopped = false;
   private retries = 0;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private videoRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private statsTimer: ReturnType<typeof setInterval> | null = null;
-  private lastBytes = 0;
-  private lastBytesAt = 0;
+  private subs: { remove(): void }[] = [];
   private snap: SessionSnapshot;
   onFileOffer: FileOfferListener | null = null;
 
   constructor(private pairing: Pairing, settings: Settings, private listener: Listener) {
-    this.snap = { status: 'connecting', settings: { ...settings }, source: 'camera', computer: pairing.name };
+    this.snap = { status: 'connecting', settings: { ...settings }, source: 'camera', audio: 'off', level: 0, video: 'off', computer: pairing.name };
   }
-
-  static screenShareSupported = Platform.OS === 'android';
 
   get link() {
     return this.snap.link;
   }
 
-  /** Switches the video feed between the camera and the phone screen (Android). */
-  async setSource(source: Source) {
-    if (source === this.snap.source) return;
-    if (source === 'screen') {
-      const stream = await mediaDevices.getDisplayMedia({ video: true } as any);
-      const track = stream.getVideoTracks()[0];
-      if (!track) return;
-      const oldCam = this.videoTrack;
-      const oldPreview = this.preview;
-      this.videoTrack = track;
-      this.preview = null;
-      (track as any).addEventListener?.('ended', () => {
-        if (this.videoTrack === track) this.setSource('camera').catch(() => {});
-      });
-      await this.videoSender?.replaceTrack(track);
-      oldCam?.stop();
-      oldPreview?.release?.(false);
-      this.update({ source: 'screen', previewUrl: undefined });
-    } else {
-      const screen = this.videoTrack;
-      this.videoTrack = null;
-      this.update({ source: 'camera' });
-      if (this.snap.settings.cam) await this.acquireVideo();
-      await this.videoSender?.replaceTrack(this.videoTrack);
-      screen?.stop();
-    }
-    this.applyBitrate();
-    this.sendState();
-  }
-
-  // ---------- public API ----------
+  // ================= lifecycle =================
 
   async start() {
     this.stopped = false;
     this.retries = 0;
-    try {
-      await this.ensureMedia();
-    } catch (e: any) {
-      this.update({ status: 'error', error: `Microphone/camera unavailable: ${e?.message || e}` });
+    const mic = await Camera.requestMicrophonePermissionsAsync().catch(() => null);
+    if (!mic?.granted) {
+      this.update({ status: 'error', error: 'MicMe needs microphone access. Allow it in Settings › Apps › MicMe › Permissions.' });
       return;
+    }
+    if (MicmeAudio) {
+      this.subs.push(
+        MicmeAudio.addListener('onState', ({ state, message }) => {
+          this.update({ audio: state, audioError: message || undefined });
+          if (state === 'streaming' && !this.snap.startedAt) this.update({ startedAt: Date.now() });
+        }),
+        MicmeAudio.addListener('onLevel', ({ level }) => this.update({ level })),
+      );
     }
     this.connect();
   }
@@ -132,36 +115,38 @@ export class MicMeSession {
   stop() {
     this.stopped = true;
     if (this.retryTimer) clearTimeout(this.retryTimer);
+    if (this.videoRetryTimer) clearTimeout(this.videoRetryTimer);
     send(this.ws, { t: 'bye' });
+    MicmeAudio?.stop();
+    for (const s of this.subs) s.remove();
+    this.subs = [];
     this.teardownLink();
-    this.audioTrack?.stop();
-    this.videoTrack?.stop();
-    this.audioTrack = this.videoTrack = null;
-    this.preview?.release?.(false);
-    this.preview = null;
-    this.update({ status: 'closed', previewUrl: undefined, source: 'camera', link: undefined });
+    this.stopVideoTrack();
+    this.update({ status: 'closed', audio: 'off', video: 'off', previewUrl: undefined, source: 'camera', link: undefined, level: 0 });
   }
 
+  // ================= controls =================
+
   async setMic(on: boolean) {
-    if (this.audioTrack) this.audioTrack.enabled = on;
+    MicmeAudio?.setMuted(!on);
     this.patchSettings({ mic: on });
   }
 
+  async setVoiceProcessing(on: boolean) {
+    MicmeAudio?.setVoiceProcessing(on);
+    this.patchSettings({ voiceProcessing: on });
+  }
+
   async setCam(on: boolean) {
-    if (on === this.snap.settings.cam) return;
     if (this.snap.source === 'screen') return;
     this.patchSettings({ cam: on });
     if (on) {
-      await this.acquireVideo();
-      await this.videoSender?.replaceTrack(this.videoTrack);
-      this.applyBitrate();
+      await this.acquireCamera();
+      await this.syncVideoLink();
     } else {
-      await this.videoSender?.replaceTrack(null);
-      this.videoTrack?.stop();
-      this.videoTrack = null;
-      this.preview?.release?.(false);
-      this.preview = null;
-      this.update({ previewUrl: undefined });
+      this.stopVideoTrack();
+      this.closePc();
+      this.update({ video: 'off' });
     }
     this.sendState();
   }
@@ -173,42 +158,54 @@ export class MicMeSession {
     try {
       (this.videoTrack as any)._switchCamera();
     } catch {
-      await this.replaceVideo();
+      await this.acquireCamera();
+      await this.videoSender?.replaceTrack(this.videoTrack);
     }
   }
 
   async setQuality(quality: Quality) {
     this.patchSettings({ quality });
-    if (this.videoTrack && this.snap.source === 'camera') await this.replaceVideo();
+    if (this.videoTrack && this.snap.source === 'camera') {
+      await this.acquireCamera();
+      await this.videoSender?.replaceTrack(this.videoTrack);
+    }
     this.applyBitrate();
   }
 
-  async setVoiceProcessing(on: boolean) {
-    this.patchSettings({ voiceProcessing: on });
-    const old = this.audioTrack;
-    await this.acquireAudio();
-    await this.audioSender?.replaceTrack(this.audioTrack);
-    old?.stop();
+  /** Switches the video between camera and phone screen (Android only). */
+  async setSource(source: Source) {
+    if (source === this.snap.source) return;
+    if (source === 'screen') {
+      if (!MicMeSession.screenShareSupported) return;
+      const stream = await mediaDevices.getDisplayMedia({ video: true } as any);
+      const track = stream.getVideoTracks()[0];
+      if (!track) return;
+      this.stopVideoTrack();
+      this.videoTrack = track;
+      (track as any).addEventListener?.('ended', () => {
+        if (this.videoTrack === track) this.setSource('camera').catch(() => {});
+      });
+      this.update({ source: 'screen', previewUrl: undefined });
+    } else {
+      this.stopVideoTrack();
+      this.update({ source: 'camera' });
+      if (this.snap.settings.cam) await this.acquireCamera();
+    }
+    await this.syncVideoLink();
+    this.sendState();
   }
 
-  // ---------- media ----------
+  // ================= media =================
 
-  private async ensureMedia() {
-    if (!this.audioTrack) await this.acquireAudio();
-    if (this.snap.settings.cam && this.snap.source === 'camera' && !this.videoTrack) await this.acquireVideo();
+  private stopVideoTrack() {
+    this.videoTrack?.stop();
+    this.videoTrack = null;
+    this.preview?.release?.(false);
+    this.preview = null;
+    this.update({ previewUrl: undefined });
   }
 
-  private async acquireAudio() {
-    const vp = this.snap.settings.voiceProcessing;
-    const stream = await mediaDevices.getUserMedia({
-      audio: { echoCancellation: vp, noiseSuppression: vp, autoGainControl: vp } as any,
-      video: false,
-    });
-    this.audioTrack = stream.getAudioTracks()[0];
-    this.audioTrack.enabled = this.snap.settings.mic;
-  }
-
-  private async acquireVideo() {
+  private async acquireCamera() {
     const q = QUALITY[this.snap.settings.quality];
     const stream = await mediaDevices.getUserMedia({
       audio: false,
@@ -219,16 +216,11 @@ export class MicMeSession {
         frameRate: { ideal: q.fps },
       } as any,
     });
+    const old = this.videoTrack;
+    const oldPreview = this.preview;
     this.videoTrack = stream.getVideoTracks()[0];
     this.preview = stream;
     this.update({ previewUrl: stream.toURL() });
-  }
-
-  private async replaceVideo() {
-    const old = this.videoTrack;
-    const oldPreview = this.preview;
-    await this.acquireVideo();
-    await this.videoSender?.replaceTrack(this.videoTrack);
     old?.stop();
     oldPreview?.release?.(false);
   }
@@ -239,12 +231,12 @@ export class MicMeSession {
     try {
       const params = sender.getParameters();
       if (!params.encodings || !params.encodings.length) return;
-      params.encodings[0].maxBitrate = QUALITY[this.snap.settings.quality].kbps * 1000;
+      params.encodings[0].maxBitrate = (this.snap.source === 'screen' ? 3000 : QUALITY[this.snap.settings.quality].kbps) * 1000;
       sender.setParameters(params).catch(() => {});
     } catch {}
   }
 
-  // ---------- link ----------
+  // ================= signaling =================
 
   private async connect() {
     this.update({ status: this.retries ? 'reconnecting' : 'connecting', error: undefined });
@@ -256,8 +248,8 @@ export class MicMeSession {
       }
       this.ws = ws;
       this.update({ host });
-      ws.onmessage = (ev) => this.onSignal(ev.data);
-      ws.onclose = () => this.linkLost('Connection to the computer closed.');
+      ws.onmessage = (ev) => this.onSignal(ev.data).catch(() => {});
+      ws.onclose = () => this.linkLost('Lost connection to the computer.');
       ws.onerror = () => {};
       send(ws, { t: 'hello', role: 'phone', code: this.pairing.code, device: deviceInfo() });
     } catch (e: any) {
@@ -273,16 +265,28 @@ export class MicMeSession {
       return;
     }
     switch (msg.t) {
-      case 'welcome':
+      case 'welcome': {
         this.retries = 0;
+        const base = `http://${this.snap.host}:${this.pairing.port}`;
         this.update({
+          status: 'connected',
           computer: msg.name || this.pairing.name,
-          link: msg.token ? { base: `http://${this.snap.host}:${this.pairing.port}`, token: msg.token } : undefined,
+          link: msg.token ? { base, token: msg.token } : undefined,
         });
-        await this.negotiate();
+        if (msg.token && MicmeAudio) {
+          MicmeAudio.start(`ws://${this.snap.host}:${this.pairing.port}/audio?token=${msg.token}`, this.snap.settings.voiceProcessing);
+          MicmeAudio.setMuted(!this.snap.settings.mic);
+        } else if (!MicmeAudio) {
+          this.update({ audio: 'error', audioError: 'Audio streaming is only available on Android for now.' });
+        }
+        this.sendState();
+        if (this.snap.settings.cam && this.snap.source === 'camera' && !this.videoTrack) await this.acquireCamera().catch(() => {});
+        await this.syncVideoLink();
         break;
+      }
       case 'error':
         this.stopped = true;
+        MicmeAudio?.stop();
         this.teardownLink();
         this.update({ status: 'error', error: msg.reason || 'Rejected by the computer.' });
         break;
@@ -298,57 +302,74 @@ export class MicMeSession {
         else this.pendingIce.push(msg.candidate);
         break;
       case 'control':
-        await this.onControl(msg.action, msg.value);
+        await this.onControl(msg.action, msg.value).catch(() => {});
         break;
       case 'file-offer':
         if (Array.isArray(msg.files)) this.onFileOffer?.(msg.files);
         break;
       case 'renegotiate':
-        await this.negotiate();
+        this.sendState();
+        await this.syncVideoLink(true);
         break;
     }
   }
 
   private async onControl(action: string, value: any) {
-    try {
-      if (action === 'mic') await this.setMic(!!value);
-      else if (action === 'cam') await this.setCam(!!value);
-      else if (action === 'flip') await this.flip();
-      else if (action === 'quality' && value in QUALITY) await this.setQuality(value);
-      else if (action === 'voice') await this.setVoiceProcessing(!!value);
-    } catch {}
+    if (action === 'mic') await this.setMic(!!value);
+    else if (action === 'cam') await this.setCam(!!value);
+    else if (action === 'flip') await this.flip();
+    else if (action === 'quality' && value in QUALITY) await this.setQuality(value);
+    else if (action === 'voice') await this.setVoiceProcessing(!!value);
+    else if (action === 'source' && (value === 'camera' || value === 'screen')) await this.setSource(value);
+  }
+
+  // ================= video link (WebRTC) =================
+
+  /** Opens the WebRTC link when there is something to show, closes it otherwise. */
+  private async syncVideoLink(force = false) {
+    if (!this.ws || this.snap.status !== 'connected') return;
+    if (!this.videoTrack) {
+      this.closePc();
+      this.update({ video: 'off' });
+      return;
+    }
+    if (this.pc && !force) {
+      await this.videoSender?.replaceTrack(this.videoTrack);
+      this.applyBitrate();
+      return;
+    }
+    await this.negotiate();
   }
 
   private async negotiate() {
     this.closePc();
-    await this.ensureMedia();
+    if (!this.videoTrack) return;
     const pc = new RTCPeerConnection({ iceServers: [], bundlePolicy: 'max-bundle' });
     this.pc = pc;
     this.remoteSet = false;
     this.pendingIce = [];
-    this.update({ status: 'negotiating' });
+    this.update({ video: 'connecting' });
 
     const stream = new MediaStream();
-    this.audioSender = pc.addTransceiver(this.audioTrack as MediaStreamTrack, { direction: 'sendonly', streams: [stream] }).sender;
-    this.videoSender = (
-      this.videoTrack
-        ? pc.addTransceiver(this.videoTrack, { direction: 'sendonly', streams: [stream] })
-        : pc.addTransceiver('video', { direction: 'sendonly', streams: [stream] })
-    ).sender;
+    this.videoSender = pc.addTransceiver(this.videoTrack, { direction: 'sendonly', streams: [stream] }).sender;
 
     (pc as any).addEventListener('icecandidate', (e: any) => {
       if (e.candidate) send(this.ws, { t: 'ice', candidate: e.candidate.toJSON ? e.candidate.toJSON() : e.candidate });
     });
     (pc as any).addEventListener('connectionstatechange', () => {
-      const st = pc.connectionState;
       if (pc !== this.pc) return;
+      const st = pc.connectionState;
       if (st === 'connected') {
-        this.update({ status: 'live', startedAt: this.snap.startedAt || Date.now() });
+        this.update({ video: 'live' });
         this.applyBitrate();
         this.startStats();
-        this.sendState();
-      } else if (st === 'failed') {
-        this.linkLost('Media link failed. Retrying…');
+      } else if (st === 'failed' || st === 'disconnected') {
+        // Only the video retries; audio and the session keep going.
+        this.update({ video: 'retrying' });
+        if (this.videoRetryTimer) clearTimeout(this.videoRetryTimer);
+        this.videoRetryTimer = setTimeout(() => {
+          if (!this.stopped && this.pc === pc) this.syncVideoLink(true).catch(() => {});
+        }, 3000);
       }
     });
 
@@ -364,39 +385,33 @@ export class MicMeSession {
 
   private startStats() {
     if (this.statsTimer) clearInterval(this.statsTimer);
-    this.lastBytes = 0;
-    this.lastBytesAt = 0;
     this.statsTimer = setInterval(async () => {
       const pc = this.pc;
       if (!pc) return;
       try {
         const report: any = await pc.getStats();
         let rtt: number | undefined;
-        let bytes = 0;
         report.forEach((r: any) => {
           if (r.type === 'candidate-pair' && r.nominated && r.currentRoundTripTime != null) rtt = r.currentRoundTripTime * 1000;
-          if (r.type === 'outbound-rtp') bytes += r.bytesSent || 0;
         });
-        const now = Date.now();
-        let kbps: number | undefined;
-        if (this.lastBytesAt) kbps = ((bytes - this.lastBytes) * 8) / (now - this.lastBytesAt);
-        this.lastBytes = bytes;
-        this.lastBytesAt = now;
-        this.update({ rttMs: rtt != null ? Math.round(rtt) : undefined, kbps: kbps != null ? Math.max(0, Math.round(kbps)) : undefined });
+        this.update({ rttMs: rtt != null ? Math.round(rtt) : undefined });
       } catch {}
     }, 2000);
   }
 
+  // ================= teardown / retry =================
+
   private linkLost(reason: string) {
     if (this.stopped) return;
+    MicmeAudio?.stop();
     this.teardownLink();
     this.retries += 1;
     if (this.retries > MAX_RETRIES) {
       this.update({ status: 'error', error: reason });
       return;
     }
-    this.update({ status: 'reconnecting', error: reason });
-    const delay = Math.min(5000, 600 * this.retries);
+    this.update({ status: 'reconnecting', error: reason, audio: 'off', video: 'off' });
+    const delay = Math.min(4000, 500 * this.retries);
     this.retryTimer = setTimeout(() => this.connect(), delay);
   }
 
@@ -404,17 +419,21 @@ export class MicMeSession {
     if (this.statsTimer) clearInterval(this.statsTimer);
     this.statsTimer = null;
     if (this.pc) {
-      try { this.pc.close(); } catch {}
+      try {
+        this.pc.close();
+      } catch {}
     }
     this.pc = null;
-    this.audioSender = this.videoSender = null;
+    this.videoSender = null;
   }
 
   private teardownLink() {
     this.closePc();
     if (this.ws) {
       this.ws.onmessage = this.ws.onclose = this.ws.onerror = null;
-      try { this.ws.close(); } catch {}
+      try {
+        this.ws.close();
+      } catch {}
     }
     this.ws = null;
   }

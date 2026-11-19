@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from './Icon.jsx';
-import { Meter } from './Meter.jsx';
 
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
@@ -9,7 +8,7 @@ const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
  *   wheel / trackpad pinch → zoom at cursor   drag → pan (when zoomed)
  *   double-click → fullscreen   R rotate · M mirror · F fullscreen · 0 reset
  */
-export function Stage({ stream, hasVideo, phone, phoneState, linkState, analyser, clean, onToggleClean }) {
+export function Stage({ stream, hasVideo, placeholder, banner, clean, onToggleClean }) {
   const wrapRef = useRef(null);
   const videoRef = useRef(null);
   const [size, setSize] = useState({ cw: 1, ch: 1, vw: 16, vh: 9 });
@@ -99,8 +98,6 @@ export function Stage({ stream, hasVideo, phone, phoneState, linkState, analyser
   const sy = fit * view.zoom;
   const transform = `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) rotate(${view.rot}deg) scale(${sx}, ${sy})`;
 
-  const waiting = !phone;
-  const audioOnly = phone && !hasVideo;
 
   return (
     <section className={`stage ${view.zoom > 1 ? 'zoomed' : ''}`}>
@@ -122,31 +119,8 @@ export function Stage({ stream, hasVideo, phone, phoneState, linkState, analyser
           style={{ width: size.vw, height: size.vh, transform, visibility: hasVideo ? 'visible' : 'hidden' }}
         />
 
-        {waiting && (
-          <div className="stage-empty">
-            <div className="pulse-ring">
-              <Icon name="phone" size={40} />
-            </div>
-            <h2>Waiting for your phone</h2>
-            <p className="muted">Open MicMe on your phone and scan the QR code.</p>
-          </div>
-        )}
-
-        {audioOnly && (
-          <div className="stage-empty">
-            <div className={`mic-orb ${phoneState?.mic === false ? 'off' : ''}`}>
-              <Icon name={phoneState?.mic === false ? 'micOff' : 'mic'} size={46} />
-            </div>
-            <h2>{phoneState?.mic === false ? 'Phone mic is muted' : 'Audio only'}</h2>
-            <div className="stage-meter">
-              <Meter analyser={analyser} bars={40} />
-            </div>
-          </div>
-        )}
-
-        {phone && linkState !== 'live' && (
-          <div className="stage-banner">{linkState === 'lost' ? 'Link interrupted, waiting for the phone to reconnect…' : 'Starting stream…'}</div>
-        )}
+        {!hasVideo && placeholder && <div className="stage-empty">{placeholder}</div>}
+        {banner && <div className="stage-banner">{banner}</div>}
       </div>
 
       {hasVideo && (

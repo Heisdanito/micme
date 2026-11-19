@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import workletSource from './pcm-worklet.js?raw';
 
 const VIRTUAL_RE = /cable input|vb-audio|voicemeeter|virtual|blackhole|loopback/i;
+const SAMPLE_RATE = 48000;
 
 export function isVirtualDevice(label = '') {
   return VIRTUAL_RE.test(label);
@@ -35,57 +37,73 @@ export function useOutputDevices() {
 }
 
 /**
- * Routes the phone's audio: phone → gain (0–300%) → chosen output device
- * (e.g. "CABLE Input" so other apps see it as a microphone), plus an
- * optional monitor copy on the default speakers.
+ * Plays the phone's raw PCM stream:
+ *   PCM16 frames → AudioWorklet jitter buffer → gain (0–300%) → analyser
+ *                                                          ↘ output device (e.g. CABLE Input) + optional monitor
+ * `push(arrayBuffer)` feeds one binary frame from the socket.
  */
-export function useAudioEngine(stream, { outputId, gain, monitor }) {
+export function useAudioEngine(active, { outputId, gain, monitor }) {
   const [engine, setEngine] = useState(null); // { analyser, outStream }
+  const [health, setHealth] = useState({ bufferMs: 0, underruns: 0, kbps: 0 });
   const parts = useRef(null);
+  const bytes = useRef({ n: 0, at: performance.now() });
 
   useEffect(() => {
-    const tracks = stream ? stream.getAudioTracks() : [];
-    if (!tracks.length) {
-      setEngine(null);
-      return;
-    }
-    const raw = new MediaStream(tracks);
-    // Chromium only feeds remote WebRTC audio into WebAudio when the stream
-    // is also attached to a media element, so keep a muted one alive.
-    const sinkEl = new Audio();
-    sinkEl.muted = true;
-    sinkEl.srcObject = raw;
-    sinkEl.play().catch(() => {});
+    if (!active) return;
+    let disposed = false;
+    const ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: SAMPLE_RATE });
+    const url = URL.createObjectURL(new Blob([workletSource], { type: 'application/javascript' }));
+    let outEl;
+    let monEl;
 
-    const ctx = new AudioContext({ latencyHint: 'interactive', sampleRate: 48000 });
-    const src = ctx.createMediaStreamSource(raw);
-    const gainNode = ctx.createGain();
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 1024;
-    const dest = ctx.createMediaStreamDestination();
-    src.connect(gainNode);
-    gainNode.connect(analyser);
-    gainNode.connect(dest);
+    ctx.audioWorklet
+      .addModule(url)
+      .then(() => {
+        if (disposed) return;
+        const player = new AudioWorkletNode(ctx, 'pcm-player', { numberOfInputs: 0, outputChannelCount: [1] });
+        player.port.onmessage = (e) => setHealth((h) => ({ ...h, ...e.data }));
+        const gainNode = ctx.createGain();
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        const dest = ctx.createMediaStreamDestination();
+        player.connect(gainNode);
+        gainNode.connect(analyser);
+        gainNode.connect(dest);
 
-    const outEl = new Audio();
-    outEl.srcObject = dest.stream;
-    const monEl = new Audio();
-    monEl.srcObject = dest.stream;
+        outEl = new Audio();
+        outEl.srcObject = dest.stream;
+        monEl = new Audio();
+        monEl.srcObject = dest.stream;
 
-    parts.current = { ctx, gainNode, outEl, monEl, sinkEl };
-    setEngine({ analyser, outStream: dest.stream });
-    ctx.resume().catch(() => {});
+        parts.current = { ctx, player, gainNode, outEl, monEl };
+        setEngine({ analyser, outStream: dest.stream });
+        ctx.resume().catch(() => {});
+      })
+      .catch((err) => console.error('audio worklet failed', err));
+
+    const meter = setInterval(() => {
+      const now = performance.now();
+      const b = bytes.current;
+      const kbps = Math.round((b.n * 8) / (now - b.at));
+      bytes.current = { n: 0, at: now };
+      setHealth((h) => ({ ...h, kbps }));
+    }, 1000);
 
     return () => {
-      for (const el of [outEl, monEl, sinkEl]) {
+      disposed = true;
+      clearInterval(meter);
+      for (const el of [outEl, monEl]) {
+        if (!el) continue;
         el.pause();
         el.srcObject = null;
       }
       ctx.close().catch(() => {});
+      URL.revokeObjectURL(url);
       parts.current = null;
       setEngine(null);
+      setHealth({ bufferMs: 0, underruns: 0, kbps: 0 });
     };
-  }, [stream]);
+  }, [active]);
 
   useEffect(() => {
     const p = parts.current;
@@ -104,13 +122,23 @@ export function useAudioEngine(stream, { outputId, gain, monitor }) {
   useEffect(() => {
     const p = parts.current;
     if (!p) return;
-    // Only needed when the main output is not already the speakers.
     const needMonitor = monitor && outputId && outputId !== 'default';
     if (needMonitor) p.monEl.play().catch(() => {});
     else p.monEl.pause();
   }, [monitor, outputId, engine]);
 
-  return engine;
+  /** Feed one little-endian PCM16 frame. */
+  const push = useCallback((buf) => {
+    bytes.current.n += buf.byteLength;
+    const p = parts.current;
+    if (!p) return;
+    const pcm = new Int16Array(buf);
+    const f = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
+    p.player.port.postMessage(f, [f.buffer]);
+  }, []);
+
+  return { engine, health, push };
 }
 
 /** Records the incoming video (if any) plus processed audio to a webm file. */

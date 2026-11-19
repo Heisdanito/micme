@@ -17,6 +17,9 @@ const PATHS = {
   phone: <><rect x="7" y="2.5" width="10" height="19" rx="2.5" /><path d="M11 18.5h2" /></>,
   pin: <path d="M9 4h6l-1 5 3 3v2H7v-2l3-3zM12 14v6" />,
   x: <path d="M6 6l12 12M18 6 6 18" />,
+  qr: <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><path d="M14 14h2v2h-2zM18 18h2v2h-2zM14 18v2M18 14h2" /></>,
+  folder: <path d="M3.5 7.5A1.5 1.5 0 0 1 5 6h4l2 2h8a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 19H5a1.5 1.5 0 0 1-1.5-1.5z" />,
+  screen: <><rect x="3" y="4.5" width="18" height="12" rx="2" /><path d="M8.5 20h7M12 16.5V20" /></>,
   info: <><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></>,
   mirror: <><path d="M12 3v18" strokeDasharray="2 2" /><path d="M9 7 4 17h5zM15 7l5 10h-5z" /></>,
 };

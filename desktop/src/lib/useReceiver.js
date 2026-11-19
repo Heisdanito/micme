@@ -6,12 +6,15 @@ import { tuneOpus } from './sdp.js';
  * and answers the phone's WebRTC offer. Exposes the incoming MediaStream,
  * the phone's reported state, live stats and a `control()` to drive the phone.
  */
-export function useReceiver(info) {
+export function useReceiver(info, onPcm) {
   const [phone, setPhone] = useState(null); // { name, os, ip }
   const [phoneState, setPhoneState] = useState(null); // { mic, cam, facing, quality, voiceProcessing, hasVideo }
   const [stream, setStream] = useState(null);
   const [linkState, setLinkState] = useState('idle'); // idle | negotiating | live | lost
   const [stats, setStats] = useState(null);
+  const [audioOn, setAudioOn] = useState(false);
+  const pcmRef = useRef(onPcm);
+  pcmRef.current = onPcm;
   const wsRef = useRef(null);
   const pcRef = useRef(null);
   const pendingIce = useRef([]);
@@ -75,16 +78,25 @@ export function useReceiver(info) {
 
     const connect = () => {
       const ws = new WebSocket(`ws://127.0.0.1:${info.port}/ws`);
+      ws.binaryType = 'arraybuffer';
       wsRef.current = ws;
       ws.onopen = () => ws.send(JSON.stringify({ t: 'hello', role: 'desktop', code: info.adminSecret }));
       ws.onmessage = async (ev) => {
+        if (ev.data instanceof ArrayBuffer) {
+          pcmRef.current?.(ev.data);
+          return;
+        }
         let msg;
         try { msg = JSON.parse(ev.data); } catch { return; }
         switch (msg.t) {
           case 'phone-joined':
             setPhone(msg.device);
             break;
+          case 'audio':
+            setAudioOn(!!msg.on);
+            break;
           case 'phone-left':
+            setAudioOn(false);
             setPhone(null);
             setPhoneState(null);
             setLinkState('idle');
@@ -176,5 +188,5 @@ export function useReceiver(info) {
   const control = useCallback((action, value) => send({ t: 'control', action, value }), [send]);
   const kick = useCallback(() => send({ t: 'kick' }), [send]);
 
-  return { phone, phoneState, stream, linkState, stats, control, kick };
+  return { phone, phoneState, stream, linkState, audioOn, stats, control, kick };
 }
