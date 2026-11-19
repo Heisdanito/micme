@@ -99,6 +99,14 @@ npm run mobile:apk                           # needs `npx eas-cli login` once
 
 Install the APK, then for development run `npm run mobile` and open the dev build.
 
+> **Windows tip:** if the Android build fails with *"Filename longer than 260 characters"*, the SDK's default CMake ships an old
+> ninja that ignores Windows long paths. Install CMake 3.31+ from Android Studio's SDK Manager, then add it to
+> `mobile/android/local.properties` (machine-local, not committed):
+> ```properties
+> cmake.dir=C:/Users/<you>/AppData/Local/Android/Sdk/cmake/3.31.6
+> ```
+> Adding `-PreactNativeArchitectures=arm64-v8a` to the Gradle command builds only for 64-bit phones, which is much faster.
+
 ## Connecting
 
 1. Open **MicMe** on the PC. It shows a QR code and the links it can see.

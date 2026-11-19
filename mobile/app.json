@@ -68,7 +68,8 @@
         {
           "android": {
             "minSdkVersion": 24,
-            "usesCleartextTraffic": true
+            "usesCleartextTraffic": true,
+            "extraProguardRules": "-keep class org.webrtc.** { *; }\n-dontwarn org.webrtc.**\n-keep class com.oney.WebRTCModule.** { *; }"
           }
         }
       ],
