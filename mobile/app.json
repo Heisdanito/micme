@@ -1,0 +1,79 @@
+{
+  "expo": {
+    "name": "MicMe",
+    "slug": "micme",
+    "version": "1.0.0",
+    "scheme": "micme",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0B0D12",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.heisdanito.micme",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "MicMe connects to the MicMe desktop app on your local network, hotspot or USB link.",
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.heisdanito.micme",
+      "adaptiveIcon": {
+        "backgroundColor": "#0B0D12",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.WAKE_LOCK"
+      ],
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 160,
+          "resizeMode": "contain",
+          "backgroundColor": "#0B0D12"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "MicMe uses the camera to scan the pairing QR code and to stream video to your computer.",
+          "microphonePermission": "MicMe streams your microphone to your computer.",
+          "recordAudioAndroid": true,
+          "barcodeScannerEnabled": true
+        }
+      ],
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "MicMe streams your camera to your computer.",
+          "microphonePermission": "MicMe streams your microphone to your computer."
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 24,
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      "expo-sharing",
+      "./plugins/withScreenCapture"
+    ]
+  }
+}

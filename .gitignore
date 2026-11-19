@@ -1,0 +1,37 @@
+# ── Secrets: everything sensitive lives in private/ ──
+private/
+.env
+.env.*
+!.env.example
+*.keystore
+*.jks
+*.p8
+*.p12
+*.pem
+*.key
+*.mobileprovision
+google-services.json
+GoogleService-Info.plist
+credentials.json
+
+# ── Dependencies ──
+node_modules/
+
+# ── Build output ──
+desktop/dist/
+desktop/release/
+mobile/.expo/
+mobile/dist/
+mobile/web-build/
+mobile/android/
+mobile/ios/
+*.tsbuildinfo
+
+# ── Logs / OS / editor ──
+npm-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.claude/settings.local.json

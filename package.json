@@ -1,0 +1,16 @@
+{
+  "name": "micme",
+  "private": true,
+  "description": "Use your phone as a mic, camera and screen for your computer, plus two-way file sharing, over hotspot, Wi-Fi or USB.",
+  "license": "MIT",
+  "scripts": {
+    "doctor": "node scripts/doctor.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "setup": "npm --prefix desktop install && npm --prefix mobile install",
+    "desktop": "npm --prefix desktop run dev",
+    "desktop:dist": "npm --prefix desktop run dist",
+    "mobile": "npm --prefix mobile start",
+    "mobile:apk": "cd mobile && npx eas-cli@latest build -p android --profile preview",
+    "test": "npm --prefix desktop test && cd mobile && npx tsc --noEmit"
+  }
+}
